@@ -25,9 +25,14 @@ services:
     build: .
     ports:
       - "8000:8000"
+    volumes:
+      - .:/app
     depends_on:
       - db
       - rabbitmq
       - redis
     env_file:
       - .env
+  worker:
+    build: .
+    command: celery -A app.tasks worker --loglevel=info

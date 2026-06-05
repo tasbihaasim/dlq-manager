@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Webhook DLQ Dashboard</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, sans-serif; background: #0f1117; color: #e2e8f0; padding: 24px; }
+        h1 { font-size: 1.5rem; margin-bottom: 24px; color: #fff; }
+        h2 { font-size: 1rem; margin-bottom: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
+        .section { margin-bottom: 40px; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+        th { text-align: left; padding: 10px 12px; background: #1e2533; color: #64748b; font-weight: 600; }
+        td { padding: 10px 12px; border-bottom: 1px solid #1e2533; }
+        tr.received td { border-left: 3px solid #22c55e; }
+        tr.failed td { border-left: 3px solid #ef4444; }
+        tr.pending td { border-left: 3px solid #f59e0b; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+        .badge.received { background: #14532d; color: #22c55e; }
+        .badge.failed { background: #450a0a; color: #ef4444; }
+        .badge.pending { background: #451a03; color: #f59e0b; }
+        .badge.retried { background: #1e3a5f; color: #60a5fa; }
+        button { padding: 4px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 0.75rem; font-weight: 600; margin-right: 6px; }
+        button.retry { background: #1d4ed8; color: #fff; }
+        button.retry:hover { background: #2563eb; }
+        button.discard { background: #7f1d1d; color: #fff; }
+        button.discard:hover { background: #991b1b; }
+        .payload { font-family: monospace; font-size: 0.75rem; color: #94a3b8; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .empty { color: #475569; font-size: 0.875rem; padding: 16px 12px; }
+        .status-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 24px; font-size: 0.875rem; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    </style>
+</head>
+<body>
+
+    <h1>Webhook DLQ Dashboard</h1>
+
+    <div class="status-bar">
+        <div class="dot" id="ws-dot" style="background:#ef4444"></div>
+        <span id="ws-status">Connecting...</span>
+    </div>
+
+    <div class="section">
+        <h2>Live Event Feed</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Source</th>
+                    <th>Payload</th>
+                    <th>Status</th>
+                    <th>Time</th>
+                </tr>
+            </thead>
+            <tbody id="events-body">
+                <tr><td colspan="5" class="empty">Waiting for events...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="section">
+        <h2>DLQ Manager</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Error</th>
+                    <th>Retries</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="dlq-body">
+                <tr><td colspan="5" class="empty">No failed items.</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        // ── WebSocket live feed ──────────────────────────────────────────
+        const ws = new WebSocket("ws://localhost:8000/ws");
+        const dot = document.getElementById("ws-dot");
+        const wsStatus = document.getElementById("ws-status");
+
+        ws.onopen = () => {
+            dot.style.background = "#22c55e";
+            wsStatus.textContent = "Connected";
+        };
+
+        ws.onclose = () => {
+            dot.style.background = "#ef4444";
+            wsStatus.textContent = "Disconnected";
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            const body = document.getElementById("events-body");
+
+            // clear placeholder
+            if (body.querySelector(".empty")) body.innerHTML = "";
+
+            const tr = document.createElement("tr");
+            tr.className = data.status === "received" ? "received" : "failed";
+            tr.innerHTML = `
+                <td>${data.id}</td>
+                <td>${data.source}</td>
+                <td class="payload">${JSON.stringify(data.payload || {})}</td>
+                <td><span class="badge ${data.status}">${data.status}</span></td>
+                <td>${new Date().toLocaleTimeString()}</td>
+            `;
+
+            // prepend so newest is at top
+            body.insertBefore(tr, body.firstChild);
+
+            // if it's a failure, refresh DLQ table
+            if (data.status === "failed") loadDLQItems();
+        };
+
+        // ── DLQ Manager ──────────────────────────────────────────────────
+        async function loadDLQItems() {
+            const res = await fetch("http://localhost:8000/dlq_items");
+            const items = await res.json();
+            const body = document.getElementById("dlq-body");
+
+            if (!items.length) {
+                body.innerHTML = '<tr><td colspan="5" class="empty">No failed items.</td></tr>';
+                return;
+            }
+
+            body.innerHTML = items.map(item => `
+                <tr class="pending">
+                    <td>${item.id}</td>
+                    <td>${item.error_message || "-"}</td>
+                    <td>${item.retry_count}</td>
+                    <td><span class="badge ${item.status}">${item.status}</span></td>
+                    <td>
+                        <button class="retry" onclick="retryItem(${item.id})">Retry</button>
+                        <button class="discard" onclick="discardItem(${item.id})">Discard</button>
+                    </td>
+                </tr>
+            `).join("");
+        }
+
+        async function retryItem(id) {
+            await fetch(`http://localhost:8000/dlq/${id}/retry`, { method: "POST" });
+            loadDLQItems();
+        }
+
+        async function discardItem(id) {
+            await fetch(`http://localhost:8000/dlq/${id}`, { method: "DELETE" });
+            loadDLQItems();
+        }
+
+        // load DLQ on page open
+        loadDLQItems();
+    </script>
+
+</body>
+</html>

@@ -36,3 +36,9 @@ services:
   worker:
     build: .
     command: celery -A app.tasks worker --loglevel=info
+    depends_on:
+      - db
+      - rabbitmq
+      - redis
+    env_file:
+      - .env

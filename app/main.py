@@ -1,3 +1,4 @@
+from app.utils import validate_signature
 import redis
 import json
 from fastapi import FastAPI, HTTPException, WebSocket
@@ -92,9 +93,7 @@ async def get_source(source: str, request:Request):
     secret = os.getenv("WEBHOOK_SECRET")
     raw_body = await request.body()
     payload = await request.json()
-    expected = hmac.new(secret.encode(), raw_body, digestmod=hashlib.sha256).hexdigest() #creates an HMAC object using your secret as the key and SHA256 as the hashing algorithm on raw_body
-    actual = request.headers.get("X-Zapier-Signature", "").split("sha256=")[-1] # retrieves the signature from the header and removes the "sha256=" prefix to get the actual signature value
-    if not hmac.compare_digest(expected, actual):
-        return {"error": "Invalid signature"}
+    if not validate_signature(secret, raw_body, request.headers.get("X-Zapier-Signature", "")):
+        raise HTTPException(status_code=400, detail="Invalid signature")
     process_webhook_event.delay(source, payload)
     return Response(status_code=202)
